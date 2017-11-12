@@ -1,0 +1,114 @@
+--- E:\Gleamy-PrivateBlog\PrivateBlog\中间件探索\文件对比工具\test-doc\file1.txt	2017-08-11 09:43:40.608000000 +0800
++++ E:\Gleamy-PrivateBlog\PrivateBlog\中间件探索\文件对比工具\test-doc\file2.txt	2015-12-12 12:26:52.906000000 +0800
+@@ -72,7 +72,7 @@
+         private System.Timers.Timer _checkConnect = null;
+         private DateTime _lastRcvDateTime;
+ 
+-        private Dictionary<string, ItemBox> _itmsKeys = new Dictionary<string, ItemBox>();
++        private Dictionary<string, object> _itmsKeys = new Dictionary<string, object>();
+ 
+         #region - Constructor -
+ 
+@@ -180,18 +180,6 @@
+             get;
+         }
+ 
+-        /// <summary>
+-        /// CNC 版本。
+-        /// * HEIDENHAIN - 老驱动下的海德汉530。(默认)
+-        /// * HEIDENHAIN-iTNC530 - 新驱动下的海德汉530。
+-        /// * HEIDENHAIN-MANUALplus-620 - 新驱动增加海德汉620采集。
+-        /// </summary>
+-        public String CNCVersion
+-        {
+-            set;
+-            get;
+-        }
+-
+         #endregion
+ 
+         #region - Public method -
+@@ -277,10 +265,10 @@
+             {
+                 i++;
+                 _itmsKeys[grpName + "__"
+-                        + (rate == null || rate.Value < 100 ? "NULL" : rate.Value.ToString()) + "__"
+-                        + i]
+-                        //+ "=" + kv.Value]
+-                = new ItemBox() { ObjKey = kv.Key, Address = kv.Value };
++                        + (rate == null || rate.Value < 100 ? "NULL" : rate.Value.ToString()) + "__" 
++                        + i 
++                        + "=" + kv.Value] 
++                = kv.Key;
+             }
+         }
+ 
+@@ -303,7 +291,7 @@
+             string grp = string.Empty;
+             foreach (var kv in _itmsKeys)
+             {
+-                grp += kv.Key + "=" + kv.Value.Address + "[SP]";
++                grp += kv.Key + "[SP]";
+             }
+             if (grp.Length > 4)
+                 grp = grp.Substring(0, grp.Length - 4);
+@@ -313,13 +301,11 @@
+                 StartInfo = new ProcessStartInfo()
+                 {
+                     FileName = System.Reflection.Assembly.GetExecutingAssembly().Location,
+-                    Arguments = _index + " " // - 0 回传标识
+-                              + "IPC://" + ChannelName + "/Hdh_ReceiveData " // - 1 回传地址
+-                              + ip + " " // - 2 设备IP
+-                              + (string.IsNullOrEmpty(port) ? "NULL" : port) + " " // - 3 设备端口
+-                              + "\"" + grp + "\" " // - 4 需要采集的地址。
+-                              + (CNCVersion == null || CNCVersion.Trim() == string.Empty 
+-                              ? "\"NULL\"" : "\"" + CNCVersion.Trim() + "\""), // - 5 CNC版本信息。
++                    Arguments = _index + " "
++                              + "IPC://" + ChannelName + "/Hdh_ReceiveData " 
++                              + ip + " " 
++                              + (string.IsNullOrEmpty(port) ? "NULL" : port) + " "
++                              + "\"" + grp + "\" ",
+                     CreateNoWindow = true,
+                     RedirectStandardInput = true,
+                     UseShellExecute = false,
+@@ -532,13 +518,7 @@
+                 
+                 if (OnRst != null)
+                 {
+-                    if (_itmsKeys.ContainsKey(key))
+-                        OnRst(_itmsKeys[key].ObjKey, time, value);
+-                    else
+-                    {
+-                        LONGO.CommonModule.ComMethods.WriteRunLog(IP + " : key(" + key + ") non-existent");
+-                        OnRst(key, time, value);
+-                    }
++                    OnRst(_itmsKeys[key], time, value);
+                 }
+             }
+             catch (Exception ex)
+@@ -608,23 +588,6 @@
+             }
+         }
+ 
+-
+-
+         #endregion
+-
+-        private class ItemBox
+-        {
+-            public Object ObjKey
+-            {
+-                set;
+-                get;
+-            }
+-
+-            public String Address
+-            {
+-                set;
+-                get;
+-            }
+-        }
+-    }
+-}
++    }
++}

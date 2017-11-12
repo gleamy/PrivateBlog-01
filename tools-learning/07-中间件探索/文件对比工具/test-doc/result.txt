@@ -1,0 +1,81 @@
+75c75
+<         private Dictionary<string, ItemBox> _itmsKeys = new Dictionary<string, ItemBox>();
+---
+>         private Dictionary<string, object> _itmsKeys = new Dictionary<string, object>();
+183,194c182
+<         /// <summary>
+<         /// CNC 版本。
+<         /// * HEIDENHAIN - 老驱动下的海德汉530。(默认)
+<         /// * HEIDENHAIN-iTNC530 - 新驱动下的海德汉530。
+<         /// * HEIDENHAIN-MANUALplus-620 - 新驱动增加海德汉620采集。
+<         /// </summary>
+<         public String CNCVersion
+<         {
+<             set;
+<             get;
+<         }
+< 
+---
+280,283c268,271
+<                         + (rate == null || rate.Value < 100 ? "NULL" : rate.Value.ToString()) + "__"
+<                         + i]
+<                         //+ "=" + kv.Value]
+<                 = new ItemBox() { ObjKey = kv.Key, Address = kv.Value };
+---
+>                         + (rate == null || rate.Value < 100 ? "NULL" : rate.Value.ToString()) + "__" 
+>                         + i 
+>                         + "=" + kv.Value] 
+>                 = kv.Key;
+306c294
+<                 grp += kv.Key + "=" + kv.Value.Address + "[SP]";
+---
+>                 grp += kv.Key + "[SP]";
+316,322c304,308
+<                     Arguments = _index + " " // - 0 回传标识
+<                               + "IPC://" + ChannelName + "/Hdh_ReceiveData " // - 1 回传地址
+<                               + ip + " " // - 2 设备IP
+<                               + (string.IsNullOrEmpty(port) ? "NULL" : port) + " " // - 3 设备端口
+<                               + "\"" + grp + "\" " // - 4 需要采集的地址。
+<                               + (CNCVersion == null || CNCVersion.Trim() == string.Empty 
+<                               ? "\"NULL\"" : "\"" + CNCVersion.Trim() + "\""), // - 5 CNC版本信息。
+---
+>                     Arguments = _index + " "
+>                               + "IPC://" + ChannelName + "/Hdh_ReceiveData " 
+>                               + ip + " " 
+>                               + (string.IsNullOrEmpty(port) ? "NULL" : port) + " "
+>                               + "\"" + grp + "\" ",
+535,541c521
+<                     if (_itmsKeys.ContainsKey(key))
+<                         OnRst(_itmsKeys[key].ObjKey, time, value);
+<                     else
+<                     {
+<                         LONGO.CommonModule.ComMethods.WriteRunLog(IP + " : key(" + key + ") non-existent");
+<                         OnRst(key, time, value);
+<                     }
+---
+>                     OnRst(_itmsKeys[key], time, value);
+611,612c590
+< 
+< 
+---
+614,630c592,593
+< 
+<         private class ItemBox
+<         {
+<             public Object ObjKey
+<             {
+<                 set;
+<                 get;
+<             }
+< 
+<             public String Address
+<             {
+<                 set;
+<                 get;
+<             }
+<         }
+<     }
+< }
+---
+>     }
+> }

@@ -1,0 +1,630 @@
+﻿using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Runtime.Remoting;
+using System.Runtime.Remoting.Channels;
+using System.Runtime.Remoting.Channels.Ipc;
+using System.Text;
+
+namespace HeidenhainMonitor
+{
+    public delegate void PopPrgHandler(object key, DateTime time, string value);
+
+    public class HdhReaderProxy : IDisposable
+    {
+        #region - Const part -
+
+        public const int ACT_TIME = 1000 * 60 * 60 * 4;
+        public const string CNT_ON = "On";
+        public const string CNT_OF = "Of";
+        public const string CNT_HSERR = "Has error";
+        public const string CNT_NTERR = "Not error";
+
+        #endregion
+
+        private static HdhReaderProxy[] data = new HdhReaderProxy[1000];
+        private static readonly string ChannelName;
+
+        static HdhReaderProxy()
+        {
+            try
+            {
+                ChannelName =
+                      "IPC_HeidenhainMnt_"
+                    + Process.GetCurrentProcess().ProcessName + "_"
+                    + Process.GetCurrentProcess().Id;
+
+                IChannel[] ic = ChannelServices.RegisteredChannels;
+                if (ic != null && ic.Length > 0)
+                {
+                    for (int i = 0; i < ic.Length; i++)
+                    {
+                        if (ic[i].ChannelName == ChannelName)
+                        {
+                            return;
+                        }
+                    }
+                }
+
+                Hashtable ht = new Hashtable();
+                //ht["portName"] = "SiemensOPC";
+                ht["portName"] = ChannelName;
+                ht["name"]     = ChannelName;
+                ht["authorizedGroup"] = "Everyone";
+                IpcServerChannel serverChannel = new IpcServerChannel(ht, null);
+                ChannelServices.RegisterChannel(serverChannel, false);
+
+                RemotingConfiguration.
+                    RegisterWellKnownServiceType
+                    (typeof(Hdh_ReceiveData), "Hdh_ReceiveData", WellKnownObjectMode.Singleton);
+            }
+            catch
+            { }
+        }
+
+        private Process _p = null;
+        private int _index;
+        private System.Threading.ManualResetEvent _mr = new System.Threading.ManualResetEvent(false);
+        private System.Timers.Timer _checkActiveT = null;
+        private System.Timers.Timer _checkConnect = null;
+        private DateTime _lastRcvDateTime;
+
+        private Dictionary<string, ItemBox> _itmsKeys = new Dictionary<string, ItemBox>();
+
+        #region - Constructor -
+
+        public HdhReaderProxy()
+        {
+
+            //if (DateTime.Now > new DateTime(2015, 10, 25))
+            //{
+            //    throw new Exception("The license is lose.");
+            //}
+
+            CntState = CNT_OF;
+            CntError = CNT_NTERR;
+
+            lock (data)
+            {
+                for (int i = 0; i < data.Length; i++)
+                {
+                    if (data[i] == null)
+                    {
+                        _index = i;
+                        data[i] = this;
+                        break;
+                    }
+                }
+            }
+        }
+
+        ~HdhReaderProxy()
+        {
+            Dispose();
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                data[_index] = null;
+                Stop();
+                GC.SuppressFinalize(this);
+            }
+            catch { }
+        }
+
+        #endregion
+
+        #region - Event -
+
+        /// <summary> 消息 </summary>
+        public event PopMsgHandler OnMsg;
+
+        /// <summary> 错误 </summary>
+        public event PopErrHandler OnErr;
+
+        /// <summary> 采集项 </summary>
+        public event PopRstHandler OnRst;
+
+        /// <summary> 程序内容 </summary>
+        public event PopPrgHandler OnPrg;
+
+        /// <summary> 报警信息 </summary>
+        public event PopAlmHandler OnAlm;
+
+        /// <summary> 连接状态 </summary>
+        public event CntStateChangedHandler OnCntStateChanged;
+
+        /// <summary> 连接错误 </summary>
+        public event CntErrorChangedHandler OnCntErrorChanged;
+
+        #endregion
+
+        #region - Property -
+
+        /// <summary> 连接状态 </summary>
+        public string CntState
+        {
+            private set;
+            get;
+        }
+
+        /// <summary> 连接错误 </summary>
+        public string CntError
+        {
+            private set;
+            get;
+        }
+
+        /// <summary> IP </summary>
+        public string IP
+        {
+            set;
+            get;
+        }
+
+        /// <summary> 端口 </summary>
+        public string Port
+        {
+            set;
+            get;
+        }
+
+        public bool Download
+        {
+            set;
+            get;
+        }
+
+        /// <summary>
+        /// CNC 版本。
+        /// * HEIDENHAIN - 老驱动下的海德汉530。(默认)
+        /// * HEIDENHAIN-iTNC530 - 新驱动下的海德汉530。
+        /// * HEIDENHAIN-MANUALplus-620 - 新驱动增加海德汉620采集。
+        /// </summary>
+        public String CNCVersion
+        {
+            set;
+            get;
+        }
+
+        #endregion
+
+        #region - Public method -
+
+        public void Start()
+        {
+            lock (this)
+            {
+                if (CntState == CNT_ON)
+                {
+                    PopMsg(this, DateTime.Now, "HeidenhainReader start occur error, HeidenhainReader(" + IP + ") is started. ");
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(IP))
+                {
+                    throw new Exception("HeidenhainReader ip not setting.");
+                }
+
+                try
+                {
+                    _mr.Reset();
+                    _p = SttProcess(IP, Port);
+                    if (!_mr.WaitOne(1000 * 10, false))
+                    {
+                        CntStatusChanged(DateTime.Now, CNT_OF, "Heidenhain (" + IP + ") start timeout.");
+                    }
+                }
+                catch (Exception e)
+                {
+                    DateTime now = DateTime.Now;
+                    ErrStatusChanged(now, CNT_HSERR, e.Message);
+                    CntStatusChanged(now, CNT_OF, e is System.Runtime.InteropServices.COMException ? "SEVERE:" + e.Message : e.Message);
+                    PopErr(this, now, e);
+                }
+            }
+        }
+
+        public void Stop()
+        {
+            lock (this)
+            {
+                if (CntState == CNT_OF)
+                {
+                    PopMsg(this, DateTime.Now, "HeidenhainReader stop occur error, HeidenhainReader(" + IP + ") is stoped. ");
+                }
+
+                try
+                {
+                    _mr.Reset();
+                    if (_p != null)
+                    {
+                        StpProcess(_p);
+                        _p = null;
+                    }
+
+                    if (!_mr.WaitOne(1000 * 5, false))
+                    {
+                        CntStatusChanged(DateTime.Now, CNT_OF, "Heidenhain (" + IP + ") stop timeout.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrStatusChanged(DateTime.Now, CNT_HSERR, ex.Message);
+                    PopErr(this, DateTime.Now, ex);
+                }
+            }
+        }
+
+        /// <summary> 设置采集项 </summary>
+        public void SetReadItemGroup(string grpName, int? rate, Dictionary<object, string> keyAndAddress)
+        { 
+            foreach(var kv in _itmsKeys)
+            {
+                if (kv.Key.StartsWith(grpName) && kv.Key[grpName.Length] == '_')
+                {
+                    throw new Exception(grpName + " 重复。");
+                }
+            }
+
+            int i = -1;
+            foreach(var kv in keyAndAddress)
+            {
+                i++;
+                _itmsKeys[grpName + "__"
+                        + (rate == null || rate.Value < 100 ? "NULL" : rate.Value.ToString()) + "__"
+                        + i]
+                        //+ "=" + kv.Value]
+                = new ItemBox() { ObjKey = kv.Key, Address = kv.Value };
+            }
+        }
+
+        /// <summary> 清理采集项 </summary>
+        public void ClrReadItemGroup()
+        {
+            _itmsKeys.Clear();
+        }
+
+        #endregion
+
+        #region - Private method -
+
+        private Process SttProcess(string ip, string port)
+        {
+
+            if (_p != null)
+                StpProcess(_p);
+
+            string grp = string.Empty;
+            foreach (var kv in _itmsKeys)
+            {
+                grp += kv.Key + "=" + kv.Value.Address + "[SP]";
+            }
+            if (grp.Length > 4)
+                grp = grp.Substring(0, grp.Length - 4);
+
+            Process p = new Process()
+            {
+                StartInfo = new ProcessStartInfo()
+                {
+                    FileName = System.Reflection.Assembly.GetExecutingAssembly().Location,
+                    Arguments = _index + " " // - 0 回传标识
+                              + "IPC://" + ChannelName + "/Hdh_ReceiveData " // - 1 回传地址
+                              + ip + " " // - 2 设备IP
+                              + (string.IsNullOrEmpty(port) ? "NULL" : port) + " " // - 3 设备端口
+                              + "\"" + grp + "\" " // - 4 需要采集的地址。
+                              + (CNCVersion == null || CNCVersion.Trim() == string.Empty 
+                              ? "\"NULL\"" : "\"" + CNCVersion.Trim() + "\""), // - 5 CNC版本信息。
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                }
+            };
+            p.Start();
+            return p;
+        }
+
+        private Process StpProcess(Process p)
+        {
+            try
+            {
+                if (p != null)
+                {
+                    p.StandardInput.WriteLine("Exit");
+                    if (!p.WaitForExit(1000 * 5))
+                    {
+                        p.Kill();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try { p.Kill(); }
+                catch { }
+                PopErr(this, DateTime.Now, ex);
+            }
+            finally
+            {
+                try
+                {
+                    if (p != null)
+                    {
+                        p.Close();
+                        p.Dispose();
+                    }
+                }
+                catch { }
+            }
+            return p;
+        }
+
+        private void CntStatusChanged(DateTime time, string status, string message)
+        {
+            lock(this)
+            {
+                CntState = status;
+
+                #region - 检查活跃状态 -
+                    
+                if (status == CNT_ON)
+                {
+                    _lastRcvDateTime = time;
+
+                    if(_checkActiveT == null)
+                    {
+                        _checkActiveT = new System.Timers.Timer()
+                        {
+                            AutoReset = false,
+                            Interval = ACT_TIME
+                        };
+                        _checkActiveT.Elapsed += _checkActiveT_Elapsed;
+                    }
+
+                    if (_checkConnect == null)
+                    {
+                        _checkConnect = new System.Timers.Timer()
+                        {
+                            AutoReset = false,
+                            Interval = 1000 * 60
+                        };
+                        _checkConnect.Elapsed += new System.Timers.ElapsedEventHandler(_checkConnect_Elapsed);
+                        _checkConnect.Start();
+                    }
+                }
+                
+                if (status == CNT_OF)
+                {
+                    if(_checkActiveT != null)
+                    {
+                        _checkActiveT.Stop();
+                        _checkActiveT.Elapsed -= _checkActiveT_Elapsed;
+                        _checkActiveT.Dispose();
+                        _checkActiveT = null;
+                    }
+
+                    if (_checkConnect != null)
+                    {
+                        _checkConnect.Stop();
+                        _checkConnect.Elapsed -= _checkConnect_Elapsed;
+                        _checkConnect.Dispose();
+                        _checkConnect = null;
+                    }
+
+                }
+
+                #endregion
+
+                if (OnCntStateChanged != null)
+                {
+                    OnCntStateChanged.BeginInvoke(this, time, status, message, null, null);
+                }
+            }
+        }
+
+        private void _checkActiveT_Elapsed(object sender, System.Timers.ElapsedEventArgs e)
+        {
+            DateTime now = e.SignalTime;
+            try
+            {
+                string msg = "Heidenhain receive data timeout（" + IP + "）. Last time " + _lastRcvDateTime.ToString("HH:mm:ss");
+                ErrStatusChanged(now, CNT_HSERR, msg);
+                Stop();
+                PopMsg(this, now, msg);
+            }
+            catch (Exception ex)
+            {
+                PopErr(this, DateTime.Now, ex);
+            }
+        }
+
+        private void _checkConnect_Elapsed(object sender, System.Timers.ElapsedEventArgs e)
+        {
+            if (!Ping(IP, Port, 1000 * 5) || (_p != null && _p.HasExited))
+            {
+                Stop();
+            }
+            else
+            {
+                if(_checkConnect != null)
+                    _checkConnect.Start();
+            }
+        }
+
+        private void ErrStatusChanged(DateTime time, string status, string message)
+        {
+            if (OnCntErrorChanged != null)
+            {
+                OnCntErrorChanged.BeginInvoke(this, time, status, message, null, null);
+            }
+        }
+
+        private void PopPrg(object key, DateTime time, string value)
+        {
+            try
+            {
+                byte[] bt = TNCCmd.LoadFile(IP, value);
+
+                if (bt != null && bt.Length > 0)
+                {
+                    if (OnPrg != null)
+                        OnPrg(key, time, System.Text.Encoding.UTF8.GetString(bt));
+                }
+            }
+            catch (Exception ex)
+            {
+                PopErr(this, DateTime.Now, ex);
+            }
+        }
+
+        private void PopMsg(object sender, DateTime time, string msg)
+        {
+            if (OnMsg != null)
+            {
+                OnMsg(sender, time, msg);
+            }
+        }
+
+        private void PopErr(object sender, DateTime time, Exception ex)
+        {
+            if (OnErr != null)
+            {
+                OnErr(sender, time, ex);
+            }
+        }
+
+        private bool Ping(string ip, string port, int timeout)
+        {
+            return LONGO.CommonModule.ComMethods.CheckNet(ip, port, timeout);
+        }
+
+        #endregion
+
+        #region - Remoting rcv -
+
+        public void RcvCntStatus(DateTime time, string status, string message)
+        {
+            _mr.Set();
+            CntStatusChanged(time, status, message);
+        }
+
+        public void RcvData(string key, DateTime time, string value)
+        {
+            try
+            {
+                _lastRcvDateTime = DateTime.Now;
+                if (_checkActiveT != null)
+                {
+                    _checkActiveT.Interval = ACT_TIME;
+                    _checkActiveT.Start();
+                }
+
+                // - Download program -
+                if (Download && OnPrg != null && !string.IsNullOrEmpty(value) && key.EndsWith("ProgramName"))
+                {
+                    new PopPrgHandler(PopPrg).BeginInvoke(this, time, value, null, null);
+                }
+                
+                if (OnRst != null)
+                {
+                    if (_itmsKeys.ContainsKey(key))
+                        OnRst(_itmsKeys[key].ObjKey, time, value);
+                    else
+                    {
+                        LONGO.CommonModule.ComMethods.WriteRunLog(IP + " : key(" + key + ") non-existent");
+                        OnRst(key, time, value);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                PopErr(this, DateTime.Now, ex);
+            }
+        }
+
+        public void RcvAlarms(DateTime time, int chn, string grp, int num, string cls, string msg)
+        {
+            _lastRcvDateTime = DateTime.Now;
+            if (_checkActiveT != null)
+            {
+                _checkActiveT.Interval = ACT_TIME;
+                _checkActiveT.Start();
+            }
+
+            if (OnAlm != null)
+            {
+                OnAlm(this, time, chn, grp, num, cls, msg); ;
+            }
+        }
+
+        #endregion
+
+        #region - "ReceiveData" define -
+
+        internal class Hdh_ReceiveData : MarshalByRefObject
+        {
+            public void RcvMessage(int sign, DateTime time, string message)
+            {
+                if (data[sign] != null)
+                    data[sign].PopMsg(data[sign], time, message);
+            }
+
+            public void RcvError(int sign, DateTime time, Exception ex)
+            {
+                if (data[sign] != null)
+                    data[sign].PopErr(data[sign], time, ex);
+            }
+
+            public void RcvCntStatus(int sign, DateTime time, string cntStatus, string message)
+            {
+                if (data[sign] != null)
+                    data[sign].RcvCntStatus(time, cntStatus, message);
+            }
+
+            public void RcvErrStatus(int sign, DateTime time, string errStatus, string message)
+            {
+                if (data[sign] != null)
+                    data[sign].ErrStatusChanged(time, errStatus, message);
+            }
+
+            public void RcvData(int sign, string key, DateTime time, string value)
+            {
+                if (data[sign] != null)
+                    data[sign].RcvData(key, time, value);
+            }
+
+            public void RcvAlarms(int sign, DateTime time, int chn, string grp, int num, string cls, string msg)
+            {
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate(object o)
+                {
+                    if (data[sign] != null)
+                        data[sign].RcvAlarms(time, chn, grp, num, cls, msg);
+                });
+            }
+        }
+
+
+
+        #endregion
+
+        private class ItemBox
+        {
+            public Object ObjKey
+            {
+                set;
+                get;
+            }
+
+            public String Address
+            {
+                set;
+                get;
+            }
+        }
+    }
+}
