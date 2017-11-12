@@ -7,6 +7,7 @@
   <version>1.0-SNAPSHOT</version>
   <modules>
     <module>common-test</module>
+    <module>spring-4.0</module>
   </modules>
   <packaging>pom</packaging>
 
